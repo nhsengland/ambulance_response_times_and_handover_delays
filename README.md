@@ -21,8 +21,8 @@ _**Note:** Only public or fake data are shared in this repository._
 
 {LIST SOFTWARE USED TO CREATE PROJECT}
 
-[R Studio](RStudio Team (2020). RStudio: Integrated Development for R. RStudio, PBC, Boston, MA URL http://www.rstudio.com/.)  
-[R Statistical Software](  R Core Team (2018). R: A language and environment for statistical computing. R Foundation for Statistical Computing, Vienna, Austria. URL https://www.R-project.org/.)  
+[R Studio](http://www.rstudio.com/.)  
+[R Statistical Software](https://www.R-project.org/.)  
 [SQL SSMS](https://learn.microsoft.com/en-us/sql/ssms/download-sql-server-management-studio-ssms?view=sql-server-ver16)  
 [!Python v3.8](https://www.python.org/downloads/release/python-380/)  
 
