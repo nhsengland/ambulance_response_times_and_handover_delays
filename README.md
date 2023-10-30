@@ -1,13 +1,12 @@
 # {PROJECT NAME}
-## NHS England Digitial Analytics and Research Team - PhD Internship Project
+## NHS England South West Intelligence and Insights
 
 ### About the Project
 
+{ADD EXPERIMENTAL STATUS BADGE IF PROJECT IS IN DEVELOPMENT}
 [![status: experimental](https://github.com/GIScience/badges/raw/master/status/experimental.svg)](https://github.com/GIScience/badges#experimental)
 
 This repository holds code for the {PROJECT NAME} {SHORT DESCRIPTION}
-
-[Link to original project propsoal](https://nhsx.github.io/nhsx-internship-projects/)
 
 _**Note:** Only public or fake data are shared in this repository._
 
@@ -20,8 +19,15 @@ _**Note:** Only public or fake data are shared in this repository._
 
 ### Built With
 
-[![Python v3.8](https://img.shields.io/badge/python-v3.8-blue.svg)](https://www.python.org/downloads/release/python-380/)
+{LIST SOFTWARE USED TO CREATE PROJECT}
+
+[R Studio](RStudio Team (2020). RStudio: Integrated Development for R. RStudio, PBC, Boston, MA URL http://www.rstudio.com/.)  
+[R Statistical Software](  R Core Team (2018). R: A language and environment for statistical computing. R Foundation for Statistical Computing, Vienna, Austria. URL https://www.R-project.org/.)
+[SQL SSMS](https://learn.microsoft.com/en-us/sql/ssms/download-sql-server-management-studio-ssms?view=sql-server-ver16)
+[!Python v3.8](https://www.python.org/downloads/release/python-380/)
+
 - {LIST OF MAIN PACKAGE VERSIONS}
+
 
 ### Getting Started
 
@@ -33,15 +39,12 @@ To clone the repo:
 
 `git clone https://github.com/nhsx/{REPO NAME}`
 
-To create a suitable environment:
-- ```python -m venv _env```
-- `source _env/bin/activate`
-- `pip install -r requirements.txt`
-
 {ADDITIONAL TECHNICAL SUPPORT AND NEEDS} 
 
 ### Usage
 {DESCRIPTION OF CODE}
+{DESCRIPTION OF PROCESS AND TECHNIQUES UTILISED}
+{METHODOLOGY USED}
 
 #### Outputs
 {LIST AND DESCRIPTION OF OUTPUTS}
@@ -85,7 +88,7 @@ of the [Open Government 3.0][ogl] licence.
 
 ### Contact
 
-To find out more about the [Digitial Analytics and Research Team](https://www.nhsx.nhs.uk/key-tools-and-info/nhsx-analytics-unit/) visit our [project website](https://nhsx.github.io/AnalyticsUnit/projects.html) or get in touch at [analytics-unit@nhsx.nhs.uk](mailto:analytics-unit@nhsx.nhs.uk).
+To find out more about the South West Intelligence and Insights Team visit our [South West Intelligence and Insights Team Futures Page](https://future.nhs.uk/SouthWestAnalytics)) or get in touch at [england.southwestanalytics@nhs.net](mailto:england.southwestanalytics@nhs.net).
 
 <!-- ### Acknowledgements -->
 
