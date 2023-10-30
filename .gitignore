@@ -19,6 +19,8 @@
 *.vcf
 *.xml
 
+personal_creds.R
+
 ### direnv ###
 .direnv
 .envrc
@@ -318,6 +320,9 @@ Temporary Items
 .idea/**/dataSources.ids
 .idea/**/dataSources.local.xml
 .idea/**/sqlDataSources.xml
+
+
+
 .idea/**/dynamic.xml
 .idea/**/uiDesigner.xml
 .idea/**/dbnavigator.xml

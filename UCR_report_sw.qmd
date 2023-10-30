@@ -1,0 +1,698 @@
+---
+title: "Urgent Community Response"
+format:
+  html:
+    embed-resources: true
+editor: visual
+---
+
+```{r}
+#| echo: false
+#| warning: false
+
+library(tidyverse)
+library(janitor)
+library(NHSRplotthedots)
+library(gt)
+library(gtExtras)
+library(odbc)
+library(glue)
+
+region <- 'South West'
+
+#################################################################
+# read in data - this uses UDAL connection - check tray for 2FA #
+#################################################################
+
+source(personal_creds.R)
+
+con_udal <- DBI::dbConnect(drv = odbc::odbc(),
+                           driver = "ODBC Driver 17 for SQL Server",
+                           server = serv ,
+                           database = "UDAL_Warehouse",
+                           UID = id,
+                           authentication = "ActiveDirectoryInteractive")
+
+df <- DBI::dbGetQuery(conn = con_udal, statement = "
+
+select *
+
+from [UKHF_Urgent_Community_Response].[Two_Hour_UCR_Data1_1] as u
+
+left join (select distinct icb_code, 
+						   integrated_care_board_name, 
+						   region_name 
+		   from [Reporting_UKHD_ODS].[Provider_Hierarchies_ICB]
+		   where effective_to is null ) as h
+	on u.org_code = h.icb_code
+
+left join (select distinct region_code, 
+						   region_name as reg_name 
+		   from [Reporting_UKHD_ODS].[Provider_Hierarchies_ICB] 
+		   where effective_to is null ) as hr
+	on u.org_code = hr.region_code
+
+where effective_snapshot_date > DATEADD(mm,-18,GETDATE()) 
+	and provider in ('icb', 'region')
+	and measure in ('standard referrals', 
+				'rtt periods by target_achieved', 
+				'all care contacts' ,
+				'referrals by ageband', 
+				'standardised rate of all referrals', 
+				'standardised rate of standard care contacts')
+
+order by  effective_snapshot_date                   
+")
+
+###########################
+# Data clean up and calcs #
+###########################
+                      
+dat <- clean_names(df)
+# add region to region_name when a region
+dat <- dat |>
+  mutate(
+    region_name = if_else(is.na(region_name), 
+                          reg_name, 
+                          region_name),
+    integrated_care_board_name = if_else(is.na(integrated_care_board_name), 
+                                         region_name, 
+                                         integrated_care_board_name)
+  ) |>
+  rename(icb_name = integrated_care_board_name)
+
+# clean up ICB names so that they join with pops dataset
+dat <- dat |>
+  mutate(icb = str_remove(icb_name, "NHS ") , 
+         icb = str_replace(icb, " \\s*\\([^\\)]+\\)", ""),
+         # icb = str_replace(icb, "&", "and"),
+         icb = str_remove(icb, " STP"),
+         icb = str_remove(icb, "NHS "),
+         icb = str_remove(icb, " INTEGRATED CARE BOARD"),
+         icb = tolower(icb))
+
+# got a weird duplicate for south east london where it has been assigned to two regions
+# this is a rubbish fix
+dat <- dat |>
+  filter (!(icb == 'south east london' & region_name == 'SOUTH EAST'))
+
+###########################################
+# make lists of regions and regional icbs #
+###########################################
+
+# make list of regional icbs
+regional_icbs <- dat |>
+  mutate(region_name = tolower(region_name)) |>
+  filter (region_name == tolower(region)) |>
+  select(icb) |>
+  unique() |>
+  filter(!icb == tolower(region)) |>
+  arrange(icb)
+
+# make list of region
+regions_list <- dat |>
+  mutate(region_name = tolower(region_name)) |>
+  select(region_name) |>
+  filter (region_name != 'null') |>
+  unique() |>
+  arrange(region_name)
+
+# arranged list
+areas_arrange <- 
+  regions_list |>
+  rename(icb = region_name) |>
+  rbind(regional_icbs)
+
+###############
+# trend tests #
+###############
+
+# function to run SPC tests
+spc_test <- function (data, value) {
+  a <- data.frame(ptd_spc(data,
+                          value_field = !!value,
+                          date_field = effective_snapshot_date,
+                          improvement_direction = "increase",
+                          facet_field = icb))
+  a <- a |>
+    filter (x == max (a$x)) |>
+    select (icb = f,
+            point_type,
+            outside_limits) |>
+    mutate(trend = case_when (outside_limits == 'TRUE' & point_type == 'special_cause_improvement'~ 'arrow-up',
+                              outside_limits == 'FALSE' & point_type == 'special_cause_improvement'~ 'caret-up',
+                              outside_limits == 'FALSE' & point_type == 'common_cause'~ 'right-left',
+                              outside_limits == 'FALSE' & point_type == 'special_cause_concern'~ 'caret-down',
+                              outside_limits == 'TRUE' & point_type == 'special_cause_concern'~ 'arrow-down',
+                              TRUE ~ 'exclamation')) |>
+    select(!c(point_type,outside_limits))
+  a
+}
+
+#########################################
+# filter data to regions and local icbs #
+#########################################
+
+# also weird bit in data where sql brings through the lastest month
+# but without any data in it - have simply removed lastest month
+
+dat <- dat |>
+  filter (icb %in% c(regions_list$region_name, 
+                     regional_icbs$icb),
+          !effective_snapshot_date == max (effective_snapshot_date)) 
+
+#############################################
+# percentage complete in 2 hrs / age groups #
+#############################################
+
+# NOTE! The way the percentage achieved does not match the totals and also
+#       the 'not applicable' are removed for the calculation
+
+dat_perc <- dat |>
+  #filter(org_code == 'QE1') |>
+  filter(!breakdown == 'not applicable') |>
+  mutate(perc = round(measure_value / sum(measure_value, na.rm = TRUE) * 100, 1),
+         .by = c(icb, measure, effective_snapshot_date)) 
+
+#########################################
+# run spc tests and prep data for table #
+#########################################
+
+# number of UCR refs
+num_ucr <- dat |>
+  filter(measure == 'standard referrals',
+         effective_snapshot_date == max (effective_snapshot_date)) |>
+  select(icb,
+         num_refs = measure_value)
+
+# number refs trend
+num_ucr_trend <- dat |>
+  filter(measure == 'standard referrals')
+
+num_ucr_trend <- spc_test (num_ucr_trend, 'measure_value')
+
+# number of UCR refs standardised
+num_ucr_sd <- dat |>
+  filter(measure == 'standardised rate of all referrals',
+         effective_snapshot_date == max (effective_snapshot_date)) |>
+  select(icb,
+         stand_refs = measure_value)
+
+# perc UCR ach
+perc_ach <- dat_perc |>
+  filter(breakdown == 'Yes' ,
+         effective_snapshot_date == max (effective_snapshot_date)) |>
+  select(icb,
+         perc_ach = perc) |>
+  mutate(perc_ach = if_else(is.na(perc_ach), 0, perc_ach))
+
+# achievement percentage trend
+ucr_ach_per_trend <- dat_perc |>
+  filter(breakdown == 'Yes') |>
+        # icb == 'bristol, north somerset and south gloucestershire') |>
+  mutate(perc = if_else(is.na(perc), 0, perc))
+  
+ucr_ach_per_trend <- spc_test (ucr_ach_per_trend, 'perc')
+
+# perc age group
+perc_age <- dat_perc |>
+  filter(measure == 'referrals by ageband',
+         !is.na(breakdown),
+         effective_snapshot_date == max (effective_snapshot_date)) |>
+  mutate(perc = if_else(is.na(perc), 0, perc)) |>
+  select(icb,
+         breakdown,
+         #measure_value,
+         perc) |>
+  pivot_wider(names_from = breakdown,
+              values_from = perc) |>
+  select(!`(null)`, !`0-18`) |>
+  group_by(icb) |>
+  summarise(lst = list(c( `19-64`, `65_Plus`)))
+
+# number of UCR care contacts
+num_cc <- dat |>
+  filter(measure == 'all care contacts',
+         effective_snapshot_date == max (effective_snapshot_date)) |>
+  select(icb,
+         care_contacts = measure_value)
+
+# standard number of UCR care contacts
+num_cc_sd <- dat |>
+  filter(measure == 'standardised rate of standard care contacts',
+         effective_snapshot_date == max (effective_snapshot_date)) |>
+  select(icb,
+         sd_care_contacts = measure_value)
+
+######################
+# bind summary table #
+######################
+
+table <- num_ucr |>
+  left_join (num_ucr_trend, by = 'icb') |>
+  left_join (num_ucr_sd, by = 'icb') |>
+  left_join (perc_ach, by = 'icb') |>
+  left_join (ucr_ach_per_trend, by = 'icb') |>
+  left_join (perc_age, by = 'icb') |>
+  left_join (num_cc, by = 'icb') |>
+  left_join (num_cc_sd, by = 'icb') 
+
+# replace all nulls in table with 0
+table[is.na(table)] <- 0
+
+# arrange table in order 
+table <- table |>
+  arrange(factor(icb, levels = areas_arrange$icb)) |>
+  mutate(icb = str_to_title(icb),
+         con_ref_rate = round(care_contacts / num_refs, 1))
+
+###################
+# create GT table #
+###################
+
+# determine which row is local region
+highlight <- min(which(grepl(tolower(region), tolower(table$icb))))
+
+# create table
+gt_table <- table |>
+  gt() |>
+  gt_fa_column(trend.x,
+    height = px(15),
+    palette = "Black",
+    align = "center"
+  ) |>
+  gt_fa_column(trend.y,
+    height = px(15),
+    palette = "Black",
+    align = "center"
+  ) |>
+  gt_duplicate_column(perc_ach, 
+                      after = perc_ach, 
+                      append_text = "bar") |>
+  gt_plt_bar_pct(column = perc_achbar, 
+                 scaled = TRUE, 
+                 fill = "#005EB8", 
+                 background = "#d3d3d3") |>
+  gt_plt_bar_stack(
+    column = lst,
+    labels = c("19-64", 
+               "65 Plus"),
+    width = 50,
+    palette = c("#00A499", 
+                "#768692")
+  ) |>
+  gt_duplicate_column(stand_refs, 
+                      after = stand_refs,
+                      append_text = "bar") |>
+  gt_plt_bar_pct(column = stand_refsbar, 
+                 scaled = FALSE, 
+                 fill = "#41B6E6", 
+                 background = "#E8EDEE") |>
+  gt_duplicate_column(sd_care_contacts, 
+                      after = sd_care_contacts, 
+                      append_text = "bar") |>
+  gt_plt_bar_pct(column = sd_care_contactsbar, 
+                 scaled = FALSE, 
+                 fill = "#41B6E6", 
+                 background = "#E8EDEE") |>
+  # colour gray the background for regions
+  tab_style(
+    style = list(
+      cell_fill(color = "#E8EDEE")
+    ),
+    locations = cells_body(
+      rows = (1:7)
+    )
+  ) |> # colour aqua the selected region
+  tab_style(
+    style = list(
+      cell_fill(color = "#00A9CE")
+    ),
+    locations = cells_body(
+      rows = (highlight)
+    )
+  ) |>
+  fmt_percent(perc_ach, 
+              scale_values = FALSE, 
+              decimals = 1) |>
+  cols_label(
+    icb = "Area",
+    num_refs = "Referrals",
+    trend.x = "Ref trend",
+    stand_refs = "Refs by pop",
+    stand_refsbar = "Chart",
+    perc_ach = "2hr Achievement",
+    perc_achbar = "Chart",
+    trend.y = "2hr Trend",
+    care_contacts = "Care Contacts",
+    sd_care_contacts = "Contacts by pop",
+    sd_care_contactsbar = "Chart",
+    con_ref_rate = "Ave Contacts per referral"
+  ) |>
+  tab_spanner(label = "Referral numbers, rates and trends", 
+              columns = c(num_refs,
+                          trend.x,
+                          stand_refs,
+                          stand_refsbar
+  )) |>
+  tab_spanner(
+    label = "2hr Response",
+    columns = c(
+      perc_ach,
+      perc_achbar, 
+      trend.y
+    )
+  ) |>
+  tab_spanner(
+    label = "Age Demographic",
+    columns = lst
+  ) |>
+  tab_spanner(
+    label = "Care contacts",
+    columns = c(
+      care_contacts,
+      sd_care_contacts,
+      sd_care_contactsbar,
+      con_ref_rate
+    )
+  ) |>
+  cols_width(
+    icb ~ px(250),
+    stand_refsbar ~ px(85),
+    perc_achbar ~ px(85),
+    sd_care_contacts ~ px(25),
+    stand_refs ~ px(30),
+    con_ref_rate ~ px(40),
+    perc_ach ~ px(25),
+    sd_care_contactsbar ~ px(85)
+  ) |>
+  tab_header(
+    title = paste0("Urgent Community Response - data to ", format(max(dat$effective_snapshot_date), "%d %B %y"))
+  ) |>
+  tab_source_note(
+    source_note = "Data Source: Community Services Data Set (CSDS) - UDAL Extract - Current month is based on primary submission"
+  )
+    
+#############
+# SPC Plots #
+#############  
+
+plot_spc <- function(data, feat, meas, val, title, y_ax_lab, fixed) {
+  dat_plot <- data |>
+    filter(
+      !!sym(feat) == meas,
+      icb %in% regional_icbs$icb
+    )
+  p <- ptd_spc(dat_plot,
+    value_field = !!val,
+    date_field = effective_snapshot_date,
+    improvement_direction = "increase",
+    facet_field = icb
+  )
+
+  p |> ptd_create_ggplot(
+    main_title = title,
+    icons_position = "none",
+    fixed_y_axis_multiple = fixed,
+    point_size = 2,
+    x_axis_label = "",
+    y_axis_label = y_ax_lab,
+    x_axis_date_format = "%b %y"
+  )
+}
+
+##############
+# Commentary #
+##############  
+  
+# create region ranks   
+regions_rank <- table |>
+  filter(icb %in% str_to_title(regions_list$region_name)) |>
+  mutate(rank_ref = rank(desc(num_refs)),
+         rank_ach = rank(desc(perc_ach)),
+         rank_con = rank(desc(care_contacts)))
+
+# create icbs ranks     
+icbs_rank <- table |>
+  filter(icb %in% str_to_title(regional_icbs$icb)) |>
+  mutate(rank_ref = rank(desc(num_refs)),
+         rank_ach = rank(desc(perc_ach)))
+
+# create list of text for highest to lowest
+order_list <- c('highest', 
+                'second highest', 
+                'third highest', 
+                'middle', 
+                'third lowest', 
+                'second lowest', 
+                'lowest')
+  reg_rank <- order_list[regions_rank$rank_ref[regions_rank$icb == str_to_title(region)]]
+
+ reg_refs <- prettyNum(regions_rank$num_refs[regions_rank$icb == str_to_title(region)], big.mark = ",")
+
+ month <- format(max(dat$effective_snapshot_date), "%B")
+
+ trend_ref_reg <- case_when(
+   regions_rank$trend.x[regions_rank$icb == str_to_title(region)] == "arrow-up" ~ "special cause increasing trend",
+   regions_rank$trend.x[regions_rank$icb == str_to_title(region)] == "caret-up" ~ "increasing trend",
+   regions_rank$trend.x[regions_rank$icb == str_to_title(region)] == "right-left" ~ "static trend",
+   regions_rank$trend.x[regions_rank$icb == str_to_title(region)] == "caret-down" ~ "decreasing trend",
+   regions_rank$trend.x[regions_rank$icb == str_to_title(region)] == "arrow-down" ~ "special cause decreasing trend",
+   TRUE ~ "ooopsie"
+ )
+
+av_ref_reg <- prettyNum(round(mean(regions_rank$num_refs),1), big.mark = ",")
+
+icb_hi_ref <- icbs_rank$icb[icbs_rank$stand_refs == max(icbs_rank$stand_refs)]
+
+icb_hi_ref_num <- icbs_rank$stand_refs[icbs_rank$stand_refs == max(icbs_rank$stand_refs)]
+
+mean_icb_ref <- mean(icbs_rank$stand_refs) 
+
+sd_icb_ref <- sd(icbs_rank$stand_refs)
+
+high_icb_ref_sig <- if_else (icb_hi_ref_num > mean_icb_ref + (2 *sd_icb_ref), 'statisically signifcantly higher', 'higher')
+trend_ref_icb <- case_when(
+  icbs_rank$trend.x[icbs_rank$stand_refs == max(icbs_rank$stand_refs)] == "arrow-up" ~ "special cause increasing trend",
+  icbs_rank$trend.x[icbs_rank$stand_refs == max(icbs_rank$stand_refs)] == "caret-up" ~ "increasing trend",
+  icbs_rank$trend.x[icbs_rank$stand_refs == max(icbs_rank$stand_refs)] == "right-left" ~ "static trend",
+  icbs_rank$trend.x[icbs_rank$stand_refs == max(icbs_rank$stand_refs)] == "caret-down" ~ "decreasing trend",
+  icbs_rank$trend.x[icbs_rank$stand_refs == max(icbs_rank$stand_refs)] == "arrow-down" ~ "special cause decreasing trend",
+  TRUE ~ "ooopsie"
+)
+icb_lo_ref <- icbs_rank$icb[icbs_rank$stand_refs == min(icbs_rank$stand_refs)]
+
+icb_lo_ref_num <- icbs_rank$stand_refs[icbs_rank$stand_refs == min(icbs_rank$stand_refs)]
+
+reg_perc <- regions_rank$perc_ach[regions_rank$icb == str_to_title(region)]
+
+reg_perc_rank <- order_list[regions_rank$rank_ach[regions_rank$icb == str_to_title(region)]]
+
+trend_perc_reg <- case_when(
+  regions_rank$trend.y[regions_rank$icb == str_to_title(region)] == "arrow-up" ~ "special cause increasing trend",
+  regions_rank$trend.y[regions_rank$icb == str_to_title(region)] == "caret-up" ~ "increasing trend",
+  regions_rank$trend.y[regions_rank$icb == str_to_title(region)] == "right-left" ~ "static trend",
+  regions_rank$trend.y[regions_rank$icb == str_to_title(region)] == "caret-down" ~ "decreasing trend",
+  regions_rank$trend.y[regions_rank$icb == str_to_title(region)] == "arrow-down" ~ "special cause decreasing trend",
+  TRUE ~ "ooopsie"
+)
+
+icb_hi_perc <- icbs_rank$icb[icbs_rank$perc_ach == max(icbs_rank$perc_ach)]
+
+icb_hi_perc_ach <- icbs_rank$perc_ach[icbs_rank$perc_ach == max(icbs_rank$perc_ach)]
+
+icb_hi_perc_num <- icbs_rank$num_refs[icbs_rank$perc_ach == max(icbs_rank$perc_ach)]
+
+trend_perc_icb <- case_when(
+  icbs_rank$trend.y[icbs_rank$perc_ach == max(icbs_rank$perc_ach)] == "arrow-up" ~ "special cause increasing trend",
+  icbs_rank$trend.y[icbs_rank$perc_ach == max(icbs_rank$perc_ach)] == "caret-up" ~ "increasing trend",
+  icbs_rank$trend.y[icbs_rank$perc_ach == max(icbs_rank$perc_ach)] == "right-left" ~ "static trend",
+  icbs_rank$trend.y[icbs_rank$perc_ach == max(icbs_rank$perc_ach)] == "caret-down" ~ "decreasing trend",
+  icbs_rank$trend.y[icbs_rank$perc_ach == max(icbs_rank$perc_ach)] == "arrow-down" ~ "special cause decreasing trend",
+  TRUE ~ "ooopsie"
+)
+
+icb_lo_perc <- icbs_rank$icb[icbs_rank$perc_ach == min(icbs_rank$perc_ach)]
+
+icb_lo_perc_ach <- icbs_rank$perc_ach[icbs_rank$perc_ach == min(icbs_rank$perc_ach)]
+
+icb_lo_perc_num <- prettyNum(icbs_rank$num_refs[icbs_rank$perc_ach == min(icbs_rank$perc_ach)], big.mark = ",")
+
+trend_perc_icb_lo <- case_when(
+  icbs_rank$trend.y[icbs_rank$perc_ach == min(icbs_rank$perc_ach)] == "arrow-up" ~ "special cause increasing trend",
+  icbs_rank$trend.y[icbs_rank$perc_ach == min(icbs_rank$perc_ach)] == "caret-up" ~ "increasing trend",
+  icbs_rank$trend.y[icbs_rank$perc_ach == min(icbs_rank$perc_ach)] == "right-left" ~ "static trend",
+  icbs_rank$trend.y[icbs_rank$perc_ach == min(icbs_rank$perc_ach)] == "caret-down" ~ "decreasing trend",
+  icbs_rank$trend.y[icbs_rank$perc_ach == min(icbs_rank$perc_ach)] == "arrow-down" ~ "special cause decreasing trend",
+  TRUE ~ "ooopsie"
+)
+
+reg_con <- prettyNum(regions_rank$care_contacts[regions_rank$icb == str_to_title(region)], big.mark = ",")
+
+reg_con_rank <- order_list[regions_rank$rank_con[regions_rank$icb == str_to_title(region)]]
+
+icb_con_hi <- icbs_rank$icb[icbs_rank$sd_care_contacts == max(icbs_rank$sd_care_contacts)]
+
+icb_con_hi_sd <- icbs_rank$sd_care_contacts[icbs_rank$sd_care_contacts == max(icbs_rank$sd_care_contacts)]
+
+mean_icb_con <- round(mean(icbs_rank$sd_care_contacts), 1)
+
+sd_icb_con <- sd(icbs_rank$sd_care_contacts)
+
+high_icb_con_sig <- if_else(icb_con_hi_sd > mean_icb_con + (1 * sd_icb_con), "statisically signifcantly higher", "higher")
+
+icb_con_lo <- icbs_rank$icb[icbs_rank$sd_care_contacts == min(icbs_rank$sd_care_contacts)]
+
+icb_con_lo_sd <- icbs_rank$sd_care_contacts[icbs_rank$sd_care_contacts == min(icbs_rank$sd_care_contacts)]
+
+mean_icb_con <- round(mean(icbs_rank$sd_care_contacts), 1)
+
+sd_icb_con <- sd(icbs_rank$sd_care_contacts)
+
+low_icb_con_sig <- if_else(icb_con_hi_sd < mean_icb_con - (1 * sd_icb_con), "statisically signifcantly lower", "lower")
+
+# actual commentary lines
+line_one <- glue("The **{region}** has the **{reg_rank}** number of referrals at **{reg_refs}** in {month} and we can observe a {trend_ref_reg}.  This number is not standardised by population and does not take into account the different population sizes of the regions. The average across the regions is {av_ref_reg}.")
+
+line_two <- 'At the ICB level we can standardise to a rate by 10,000 population to give equitable comparison across ICBs.'
+
+line_three <- glue('Within the {region}; **{icb_hi_ref}** has the highest rate of referrals at **{icb_hi_ref_num}** per 10,000 population and this rate is {high_icb_ref_sig} than the other ICBs in region and we can observe a {trend_ref_icb}.')
+
+line_four <- glue('The lowest rate within region is **{icb_lo_ref}** with **{icb_lo_ref_num}** referrals per 10,000 population.')
+
+line_five <- glue('The **{region}** is performing at **{reg_perc}%** of urgent community referrals responded to within 2 hours, which is the **{reg_perc_rank}** of the regions in {month}, and we can observe this achievement rate to be a {trend_perc_reg}.')
+
+line_six <- glue ('Within the {region}; **{icb_hi_perc}** is performing the highest at **{icb_hi_perc_ach}%** of **{icb_hi_perc_num}** urgent referrals in {month} responded to with 2 hours and we can observe this achievement rate to be a {trend_perc_icb}.  ')
+
+line_seven <- glue('**{icb_lo_perc}** has the lowest achievment at **{icb_lo_perc_ach}%** of **{icb_lo_perc_num}** urgent referrals in {month} responded to with 2 hours and we can observe this achievement rate to be a {trend_perc_icb_lo}. ')
+
+line_eight <- glue('The **{region}** conducted **{reg_con}** care contacts related to urgent community response which is the {reg_con_rank} number of the regions in {month}.  This is not a standardised number and so does not take into account the relative size of the regions.')
+
+line_nine <- glue('Within the {region}; **{icb_con_hi}** had the highest rate of care contacts in {month} with **{icb_con_hi_sd}** per 10,000 population which is {high_icb_con_sig} than the average of **{mean_icb_con}** in the region.')
+
+line_ten <- glue('**{icb_con_lo}** had the lowest rate of care contacts in {month} with **{icb_con_lo_sd}** per 10,000 population which is {low_icb_con_sig} than the average of **{mean_icb_con}** in the region.')
+
+```
+
+::: column-screen-inset
+### Urgent Community Response
+
+Urgent community response teams provide urgent care to people in their homes which helps to avoid hospital admissions and enable people to live independently for longer. Through these teams, older people and adults with complex health needs who urgently need care, can get fast access to a range of health and social care professionals within two hours. This includes access to physiotherapy and occupational therapy, medication prescribing and reviews, and help with staying well-fed and hydrated.
+
+In 2021/22, providers, commissioners and systems have taken important actions to improve the capacity and responsiveness of existing UCR services to deliver care within two hours. In line with national roll-out of the two-hour standard by April 2022, integrated care systems (ICS) should provide a consistent service at scale, from 8am to 8pm, seven days a week (at a minimum) across the full geography of each ICS.
+
+### Data Commentary
+
+`r line_one`\
+`r line_two`\
+`r line_three`\
+`r line_four`\
+`r line_five`\
+`r line_six`\
+`r line_seven`\
+`r line_eight`\
+`r line_nine`\
+`r line_ten`
+
+```{r}
+#| echo: false
+#| warning: false
+#| fig.alt: "Table showing referrals, referral rates, percentage of 2 hour achievement, age demographic breakdown of referrals, care contacts, rates of care contacts and care contacts per referral for all NHS England regions and selected local ICBs for regional report."
+
+gt_table
+```
+
+### Referral Rates
+
+::: {.callout-note collapse="false" appearance="default" icon="true"}
+## Referral Rates
+
+Statistical process control (SPC) charts showing referral rates per 10,000 population. There is considerable variation of service across ICBs and so scales are recalculated per graph. It would appear that operational processes are not operating consistently within ICBs.\
+Where there are gaps or breaks in charts, this indicated data quality issues with submitted data.
+:::
+
+```{r}
+#| echo: false
+#| warning: false
+#| fig-width: 18
+#| fig-height: 8
+#| fig.alt: "SPC Charts showing rates of referrals per 10,000 populations for regional ICBs"
+  plot_spc(dat, 
+           'measure',
+    'standard referrals', 
+           'measure_value', 
+           'Standardised referrals - please note each graph has seperate scale.',
+           'Rate of referrals per 10,000 population',
+    FALSE)
+```
+
+### 2hr Achievement
+
+::: {.callout-note collapse="false" appearance="default" icon="true"}
+## 2hr Achievement
+
+Statistical process control (SPC) charts showing achievement of 2hr standard response.\
+**NOTE:** This metric can be confounded when there is a submission failure or data quality issue.
+:::
+
+```{r}
+#| echo: false
+#| warning: false
+#| fig-width: 18
+#| fig-height: 8
+#| fig.alt: "SPC Charts showing rates of 2 Hour Achievement of urgent community response referrals for regional ICBs"
+
+dat_perc[is.na(dat_perc)] <- 0  
+  
+  plot_spc(dat_perc,
+           'breakdown', 
+           'Yes', 
+           'perc',
+           'Percentage achieved - 2hr Urgent Community Response',
+           'Percentage',
+           TRUE)
+```
+
+### Care Contacts
+
+::: {.callout-note collapse="false" appearance="default" icon="true"}
+## Care contacts
+
+Statistical process control (SPC) charts showing rate of care contacts per 10,000 population.\
+**NOTE:** This metric can be confounded when there is a submission failure or data quality issue.
+:::
+
+```{r}
+#| echo: false
+#| warning: false
+#| fig-width: 18
+#| fig-height: 8
+#| fig.alt: "SPC Charts showing rates of UCR contact activity per 10,000 populations for regional ICBs"
+
+  plot_spc(dat,
+           'measure', 
+           'standardised rate of standard care contacts', 
+           'measure_value',
+           'UCR Care contacts per 10,000 population',
+           'Rate of contacts per 10,000 population',
+           TRUE) 
+```
+
+::: {.callout-warning collapse="false" appearance="default" icon="true"}
+## Data note
+
+-   Data taken from UDAL warehouse
+-   Collected from Community Services Data Set
+-   Trend commentary based on NHSE 'Making Data Count' statistical process control methodology
+-   Some number may appear not to add up, this may be due to small number supression that has been applied to the analysis\
+-   **DATA QUALITY NOTE:** Data quality is poor with missing submissions and incomplete data. This affects both regional and ICB level data.
+-   NHS England's Guidance Document for UCR can be found here [CSDS UCR Guidance](https://www.england.nhs.uk/publication/community-health-services-two-hour-urgent-community-response-standard-guidance/)\
+-   NHS England's UCR monitoring dashboard can be found here [UCR monitoring dashboard](https://app.powerbi.com/view?r=eyJrIjoiNjVhYTcxMjUtMDc3Ny00ZDJmLTk1ZWMtYjMzNDRjMmRkMTFiIiwidCI6IjM3YzM1NGIyLTg1YjAtNDdmNS1iMjIyLTA3YjQ4ZDc3NGVlMyJ9)
+:::
+
+> **Contact**\
+> [**Simon Wellesley-Miller**](mailto:Simon.Wellesley-Miller@nhs.net)\
+> *Senior Analytical Manager*\
+> *South West Intelligence and Insights Team*\
+> Version 1.0 23 October 2023
+:::
