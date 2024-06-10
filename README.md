@@ -1,21 +1,13 @@
-# {PROJECT NAME}
+# Ambulance Response Times and Handover Delays
 ## NHS England South West Intelligence and Insights
 
 ### About the Project
 
-{ADD EXPERIMENTAL STATUS BADGE IF PROJECT IS IN DEVELOPMENT}
-[![status: experimental](https://github.com/GIScience/badges/raw/master/status/experimental.svg)](https://github.com/GIScience/badges#experimental)
-
-This repository holds code for the {PROJECT NAME} {SHORT DESCRIPTION}
-
-_**Note:** Only public or fake data are shared in this repository._
+This is a simple linear regression analysis to identify the correlation of impact of handover delays to ambulance reponse times. 
 
 ### Project Stucture
 
-- The main code is found in the root of the repository (see Usage below for more information)
-- The accompanying [report](./reports/report.pdf) is also available in the `reports` folder
-- More information about the code usage can be found in the [model card](./model_card.md)
-- {OTHER REPO STRUCTURE}
+Data is obtain in NCDR and a csv created.  This report uses that dataset.
 
 ### Built With
 
@@ -24,10 +16,10 @@ _**Note:** Only public or fake data are shared in this repository._
 [R Studio](http://www.rstudio.com/.)  
 [R Statistical Software](https://www.R-project.org/.)  
 [SQL SSMS](https://learn.microsoft.com/en-us/sql/ssms/download-sql-server-management-studio-ssms?view=sql-server-ver16)  
-[!Python v3.8](https://www.python.org/downloads/release/python-380/)  
+
 
 - {LIST OF MAIN PACKAGE VERSIONS}
-
+"readxl", "tidyverse", "janitor", "fuzzyjoin", "glue", "gt", "gtExtras",  "gtsummary",  "pacman" 
 
 ### Getting Started
 
@@ -37,28 +29,21 @@ To get a local copy up and running follow these simple steps.
 
 To clone the repo:
 
-`git clone https://github.com/nhsx/{REPO NAME}`
+`git clone [https://github.com/nhsx/](https://github.com/nhsengland/ambulance_response_times_and_handover_delays)`
 
 {ADDITIONAL TECHNICAL SUPPORT AND NEEDS} 
 
 ### Usage
-{DESCRIPTION OF CODE}
-{DESCRIPTION OF PROCESS AND TECHNIQUES UTILISED}
-{METHODOLOGY USED}
+There is sql to download the dataset.
+
+There is then a qmd file that wrangles the data and creates the output report, all in a single file
 
 #### Outputs
-{LIST AND DESCRIPTION OF OUTPUTS}
+The project returns an interactive HTML report.
 
-{NOTES ON REPRODUCIBILITY OF RESULTS}
 
 #### Datasets
-{DESCRIPTION AND LINKS TO DATASETS}
-
-{LINK TO FAKE DATA TO SUPPORT INITAIL CODE RUNS}
-
-### Roadmap
-
-See the {LINK TO REPO ISSUES} for a list of proposed features (and known issues).
+Data taken from National Weekly Ambulance by ICB report for cat 2 response times and National daily Ambulance SITREP for Handover delays
 
 ### Contributing
 
@@ -91,4 +76,5 @@ of the [Open Government 3.0][ogl] licence.
 To find out more about the South West Intelligence and Insights Team visit our [South West Intelligence and Insights Team Futures Page](https://future.nhs.uk/SouthWestAnalytics)) or get in touch at [england.southwestanalytics@nhs.net](mailto:england.southwestanalytics@nhs.net).
 
 <!-- ### Acknowledgements -->
-
+A Hewson
+S Wellesley-Miller
