@@ -1,0 +1,710 @@
+---
+title: "The impact of Category 2 Ambulance Response Times as result of Handover Delays in the South West Region"
+author: "S Wellesley-Miller and A Hewson"
+format:
+  html:
+    toc: true
+    toc_float: true
+    number-sections: false
+    title-block-banner: true
+    title-block-banner-color: <#005EB8>
+    self-contained: true 
+---
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+
+
+# Specify required packages
+my_packages <- c("readxl",
+                 "tidyverse", 
+                 "janitor", 
+                 "fuzzyjoin",
+                 "glue",
+                 "gt",
+                 "gtExtras",
+                 "gtsummary",
+                 "pacman") 
+
+# Extract not installed packages
+not_installed <- my_packages[!(my_packages %in% installed.packages()[ , "Package"])]  
+
+# Install not installed packages
+if(length(not_installed)) install.packages(not_installed)   
+
+# Load all packages
+pacman::p_load(char = my_packages) 
+
+
+dat_resp <- read_excel("Amb data comparison.xlsx")
+
+dat_delay <- read_excel("Amb data comparison.xlsx",
+                        sheet = 'Amb handover time lost')
+
+
+dat_resp <- clean_names(dat_resp)
+dat_delay<- clean_names(dat_delay)
+
+#  convert daily delay data to weekly
+
+dat_delay <- dat_delay |>
+  mutate (reporting_date = floor_date(period_date_time_start, "weeks", week_start = 1) )
+
+# just checking floor dates match across dateset
+#unique(dat_delay$reporting_date)
+#unique(dat_resp$reporting_date)
+
+# need to trim both datset so they cover same period
+# can do this with an inner join on date later
+
+# create a total time lost by week
+# at icb level
+dat_delay_wk <- dat_delay |> 
+  summarise(wk_mins_delay = sum(metric_value_time_inminutes_total_time_minutes_lost), 
+            .by = c(acute_stp_name, reporting_date)) |>
+  rename(icb = acute_stp_name)
+
+icbs_delay <- unique(dat_delay_wk$icb)
+icbs_reps <- unique(dat_resp$icb)
+
+icbs_delay <- data.frame(icbs_delay) |>
+  rename(icb = icbs_delay) |>
+  mutate(orig = icb,
+         icb = toupper(icbs_delay),
+         icb = str_remove(icb , ' STP')) 
+
+icbs_reps <- data.frame(icbs_reps) |>
+  rename(icb = icbs_reps) |>
+  mutate(icb = toupper(icb),
+         icb = str_remove(icb , ' INTEGRATED CARE BOARD'))
+
+# standardise ICB names in order to join
+matched_names <- stringdist_join(icbs_delay, icbs_reps, 
+                by= 'icb', #match based on team
+                mode='left', #use left join
+                method = "jw", #use jw distance metric
+                max_dist=99, 
+                distance_col='dist') |>
+  group_by(icb.x) %>%
+  slice_min(order_by=dist, n=1) |>
+  mutate(icb.y = if_else(icb.x == 'DEVON', 'NHS DEVON', icb.y))
+
+# left join matched names to delay
+dat_delay_wk <- dat_delay_wk |>
+  left_join(matched_names,
+            by = c('icb' = 'orig'))
+
+dat_resp <- dat_resp |>
+  mutate(icb = str_remove(icb ,  ' INTEGRATED CARE BOARD'))
+
+# now join resp to delays with inner join to match dates
+joined <- dat_delay_wk |>
+  inner_join(dat_resp,
+             by = c('icb.y' = 'icb',
+                    'reporting_date' = 'reporting_date')) |>
+  mutate(icb = case_when(icb.x == 'BATH AND NORTH EAST SOMERSET, SWINDON AND WILTSHIRE' ~ 'BSW',
+                         icb.x == 'BRISTOL, NORTH SOMERSET AND SOUTH GLOUCESTERSHIRE' ~ 'BNSSG',
+                         icb.x == 'CORNWALL AND THE ISLES OF SCILLY HEALTH & SOCIAL CARE PARTNERSHIP (STP)' ~ 'CORNWALL',
+                         .default = icb.x)) |>
+  arrange(icb)
+
+# create a seperate summary data frame with pretty numbers etc for 
+# table 1 summary
+summary <- joined |>
+  mutate(tm = as.POSIXct(mean_time)) |>
+  summarise(min_resp = min(tm),
+            max_resp = max(tm),
+            max_delay = max(wk_mins_delay),
+            min_delay = min(wk_mins_delay),
+            med_resp = median (tm),
+            med_delay = median (wk_mins_delay),
+            resp = list (tm),
+            delay = list (wk_mins_delay),
+            .by = icb) |>
+  mutate(med_resp = format(med_resp, "%H:%M:%S"),
+         min_resp = format(min_resp, "%H:%M:%S"),
+         max_resp = format(max_resp, "%H:%M:%S"),
+         min_delay = paste0(prettyNum(floor(min_delay / 3600), 
+                                      big.mark = ','),':',
+                            round(((min_delay/3600) - floor((min_delay / 3600))) * 60,0) ),
+         max_delay = paste0(prettyNum(floor(max_delay / 3600), big.mark = ','),':',round(((max_delay/3600) - floor((max_delay / 3600))) * 60,0) ),
+         med_delay = paste0(prettyNum(floor(med_delay / 3600), big.mark = ','),':',round(((med_delay/3600) - floor((med_delay / 3600))) * 60,0) ))|>
+  select(ICB =icb,
+         med_resp,
+         min_resp,
+         max_resp,
+         resp,
+         med_delay,
+         min_delay,
+         max_delay,
+         delay) |>
+  arrange(ICB)
+
+table_one <- summary |> 
+  gt() |>
+  gt_plt_dist( 
+    resp,
+    type = "histogram",
+    fig_dim = c(15, 45)
+  ) |>
+  gt_plt_dist( 
+    delay,
+    type = "histogram",
+    fig_dim = c(15, 45)
+  ) |>
+  tab_spanner(label = "Response times (HH:MM:SS)", 
+              columns = c(med_resp,
+                          min_resp,
+                          max_resp,
+                          resp
+              )) |>
+  tab_spanner(label = "Handover delay times (HH:MM)", 
+              columns = c(med_delay,
+                          min_delay,
+                          max_delay,
+                          delay
+              )) |>
+  cols_label(
+    med_resp = 'Average (median)',
+    min_resp = 'Minimum',
+    max_resp = 'Maximum',
+    resp = "Distribution histogram",
+    med_delay = 'Average (median)',
+    min_delay = 'Minimum',
+    max_delay = 'Maximum',
+    delay = "Distribution histogram")  |>
+  tab_header(
+    title = paste0("Category 2 response times and handover delay times"),
+    subtitle = paste0('Data covers the period ',  format(min(joined$reporting_date), "%d %B %y"),' to ', 
+                      format(max(joined$reporting_date), "%d %B %y"))
+  ) |>
+  tab_footnote(
+    footnote = md("*Data taken from National Weekly Ambulance by ICB report for cat 2 response times and National daily Ambulance SITREP for Handover delays")
+  ) |>
+  opt_row_striping(row_striping = TRUE) |>
+  tab_style(
+    style = cell_borders(
+      sides = c("left"),
+      color = 'lightgrey',
+      weight = px(1)),
+    locations = cells_body(
+      columns = c(med_delay)
+      )
+    )
+
+# back to models
+
+
+# convert mins time into fraction
+joined <- joined |>
+  mutate(hr = hour(mean_time),
+         mins = minute(mean_time),
+         sec = second(mean_time),
+         dec_time = hr + (mins/60) + (sec/3600),
+         wk_mins_delay = wk_mins_delay / 3600)
+
+
+
+# plots for orgs
+model_plot <- function(data, level= 'icb.x', org, model)  {
+  dat_mod <- data |>
+    filter(!!sym(level)== org)
+  
+  x_max_lim <- max(dat_mod$wk_mins_delay)
+  x_max_lim <- plyr::round_any(x_max_lim,500, f = ceiling)
+  
+  mod<- lm(dec_time ~ wk_mins_delay, data = dat_mod)
+  mod_sum <- summary(mod)
+  
+  ggplot(dat_mod, aes(x=wk_mins_delay, y=dec_time)) + 
+    geom_point() +
+    ylim(0,2) +
+    xlim(0,x_max_lim)+
+    geom_smooth(method = model,  fullrange=TRUE, level = 0) +
+    theme_minimal()  +
+    xlab('Total Handover delays (Decimal hours)') +
+    ylab('Mean weekly response time (Decimal hours)') +
+    labs(subtitle = paste("Adj R2 = ",signif(summary(mod)$adj.r.squared, 5),
+                          "Intercept =",signif(mod$coef[[1]],5 ),
+                          " Slope =",signif(mod$coef[[2]], 5),
+                          " P =",plyr::round_any(signif(summary(mod)$coef[2,4], 5), 0.001, f = ceiling)),
+         title = paste0(org,' - Correlation Handovers and Response times'))
+}
+
+# test example
+# model_plot(joined,'icb.x', 'DEVON', 'lm')
+
+# model table
+
+model_table <- function (ICB) {
+dat <- joined |>
+  filter(icb == ICB) |>
+  mutate(dec_time = dec_time * 1000) |>
+  rename(`Response time` = dec_time,
+         `Handover delay time` = wk_mins_delay)
+mod <-(lm(`Response time` ~  `Handover delay time`, data = dat))
+tbl_regression(mod,
+               intercept = TRUE)
+}
+
+# commentary
+text <- function (ICB) {
+  dat <- joined |>
+    filter(icb == ICB) 
+  mod <-(lm(dec_time ~ wk_mins_delay, data = dat))
+  
+  x<-summary(mod)$r.squared 
+  
+  r_fit <- case_when(x < 0.5 ~ 'poor fit',
+                     x < 0.7 ~ 'reasonable fit',
+                     x >= 0.7 ~ 'good fit',
+                     .default = '!!!ERROR!!!')
+  
+  tot_time <- as.numeric((mod$coefficients[2] * 100) * 60)
+  mins <- floor(tot_time)
+  sec <- tot_time - mins
+  secs <- round(sec * 60,0)
+  
+  text <- glue('For {ICB} we see that there is a significant (p<0.05) correlation between handover
+               minutes and cat 2 response times.
+               The relationship is a {r_fit} and accounts for around {round(summary(mod)$r.squared*100,1)}% of the variance between the two variables. 
+               A high percentage indicates there is stronger correlation.
+               The model predicts a baseline if there were no delays then the mean response
+               time would be an average response time of circa {round((mod$coefficients[1][1]) * 60, 0)} minutes.
+               In addition each 100 hours of delays would increase the mean response time by {mins} mins {secs} secs ')
+  
+  text
+  }
+
+# final summary plot
+
+icb_list <- unique(joined$icb)
+icb <- 'placeholder'
+base <- 0
+tot_time <- 0
+increase_time <- '0:00'
+rsq<- 0
+avg_delay <- 0
+avg_graph <- 0
+overall_sum <- data.frame(icb,
+                          base,
+                          increase_time,
+                          tot_time,
+                          rsq,
+                          avg_delay,
+                          avg_graph)
+
+for (i in icb_list) {
+
+dat <- joined |>
+  filter(icb == i) 
+mod <-(lm(dec_time ~ wk_mins_delay, data = dat))
+
+# base
+base <- round((mod$coefficients[1][1]) * 60, 0)
+
+# increase
+tot_time <- as.numeric((mod$coefficients[2] * 100) * 60)
+mins <- floor(tot_time)
+sec <- tot_time - mins
+secs <- round(sec * 60,0)
+increase_time <- paste0(mins,':',secs)
+
+
+# r2
+rsq <- round(summary(mod)$r.squared*100,1)
+
+# average delay 
+avg_delay <- round(mean(dat$wk_mins_delay, na.rm = T),0)
+avg_graph <- avg_delay
+
+icb_sum <- data.frame(i,
+                       base,
+                       increase_time,
+                       tot_time,
+                       rsq,
+                       avg_delay,
+                       avg_graph) |>
+  rename(icb = i)
+
+overall_sum <- overall_sum |> 
+  rbind(icb_sum)
+
+}
+
+overall_sum <- overall_sum |>
+  filter(icb != 'placeholder')
+
+overal_sum_table <- overall_sum |>
+  gt() |>  
+  gt_plt_bar_pct(
+    column = tot_time, 
+    scaled = FALSE,
+    fill = "#005EB8", 
+    background = "lightblue", 
+    width = 120
+  ) |>
+  gt_plt_bar_pct(
+    column = avg_graph, 
+    scaled = FALSE,
+    fill = "#ED8B00", 
+    background = "lightblue", 
+    width = 120
+  ) |>
+  tab_spanner(label = "Response times", 
+              columns = c(base,
+                          increase_time,
+                          tot_time
+              )) |>
+    tab_spanner(label = "Handover delays", 
+              columns = c(avg_delay,
+                          avg_graph
+              )) |>
+  cols_label(
+    icb = "ICB",
+    base = "Base response time (Minutes)",
+    increase_time = md("Increase in response time\n per 100hrs handover delays (MM:SS)"),
+    tot_time = "Graph of increase in response time",
+    rsq = "Percentage fit of the model",
+    avg_delay = "Average weekly handover delays (HH)",
+    avg_graph = "Graph of weekly handover delays") |>
+  cols_width(
+    icb ~ px(150),
+    base ~ px(100),
+    increase_time~ px(200),
+    tot_time ~ px(150),
+    rsq~ px(120),
+    avg_delay~ px(120),
+    avg_graph ~ px(200)
+  ) |>
+  opt_row_striping(row_striping = TRUE) 
+  
+
+
+      
+
+```
+::: {.column-page}
+
+## Abstract
+
+This report looks at establishing a statistical correlation between handover delays and category 2 ambulance response time.  It utilises linear regression<sup>1</sup> models for ICBs to explore the relationship.  These models are then used to predict a baseline and the impact of additional handover delays on response times.
+
+## Introduction
+
+There is a discussion around the correlation between handover delays and the impact on category 2 ambulance response times.  This analysis conducts a linear regression to see if there is a statistically significant correlation and further identify the strength and impact of this correlation.
+
+Other research<sup>2</sup> has shown that there is a correlation and this analysis tries to replicate a small part of the methodology at a local level. 
+
+To give an idea around the context of the issue, this tables shows the average (median), minimum and maximum response times and handover delay time, it also shows a distribution of times to highlight size of outliers by the services within integrated care boards.
+
+
+```{r}
+#| fig-width: 15
+#| fig-height: 8
+#| echo: false
+table_one
+
+```
+
+## Methods
+
+This data was taken from NCDR and used R statistical software to produce the analysis and this report.  
+
+Hours and minutes were converted into decimals, daily handover times were aggregated to a weekly figure and weekly data was matched.  No data entries were found to be anomalous and so no records were removed from the analysis. The only data removed is where there was SWAST data that could not be linked to a specific ICB.
+
+The matching of data matched the location of the incident to the location of the hospital. It is possible that an incident may get conveyed to a different ICB.  This may be as much as 20% of Cornwall ICB conveyances that will attend Derriford in Devon ICB and thus skew any correlation.
+
+Linear models were created, along with plots and tables explaining the core analysis.
+
+## Results
+
+Each of the models can be explored across tabs here.  There is a visual representation of the model, the statistical outputs and an attempt at explaining the statistical outputs in plain English.
+
+::: {.callout-warning}
+## Please note
+
+The Y axis on these graphs are scaled to the data and not on a consistent scale.  This will affect the visual representations of the correlation slope.
+:::
+
+
+::: {.panel-tabset group="language"}
+### BNSSG
+
+`r text('BNSSG')`
+
+:::: {.columns}
+
+::: {.column width="60%"}
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+#| fig-width: 7
+#| fig-height: 4
+
+model_plot(joined,'icb', 'BNSSG', 'lm')
+```
+
+:::
+
+::: {.column width="40%"}
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+
+model_table('BNSSG')
+```
+
+:::
+
+::::
+
+### BSW
+
+`r text('BSW')`
+
+:::: {.columns}
+
+::: {.column width="60%"}
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+#| fig-width: 7
+#| fig-height: 4
+
+model_plot(joined,'icb', 'BSW', 'lm')
+```
+
+:::
+
+::: {.column width="40%"}
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+
+model_table('BSW')
+
+
+```
+
+:::
+
+::::
+
+### CORNWALL
+
+`r text('CORNWALL')`
+
+:::: {.columns}
+
+::: {.column width="60%"}
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+#| fig-width: 7
+#| fig-height: 4
+
+model_plot(joined,'icb', 'CORNWALL', 'lm')
+```
+
+:::
+
+::: {.column width="40%"}
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+
+model_table('CORNWALL')
+
+
+```
+
+:::
+
+::::
+
+### DEVON
+
+`r text('DEVON')`
+
+:::: {.columns}
+
+::: {.column width="60%"}
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+#| fig-width: 7
+#| fig-height: 4
+
+model_plot(joined,'icb', 'DEVON', 'lm')
+```
+
+:::
+
+::: {.column width="40%"}
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+
+model_table('DEVON')
+```
+
+:::
+
+::::
+
+### DORSET
+
+`r text('DORSET')`
+
+:::: {.columns}
+
+::: {.column width="60%"}
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+#| fig-width: 7
+#| fig-height: 4
+
+model_plot(joined,'icb', 'DORSET', 'lm')
+```
+
+:::
+
+::: {.column width="40%"}
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+
+model_table('DORSET')
+
+```
+
+:::
+
+::::
+
+### GLOUCESTERSHIRE
+
+`r text('GLOUCESTERSHIRE')`
+
+:::: {.columns}
+
+::: {.column width="60%"}
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+#| fig-width: 7
+#| fig-height: 4
+
+model_plot(joined,'icb', 'GLOUCESTERSHIRE', 'lm')
+```
+
+:::
+
+::: {.column width="40%"}
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+
+model_table('GLOUCESTERSHIRE')
+
+
+```
+:::
+
+::::
+
+### SOMERSET
+
+`r text('SOMERSET')`
+
+:::: {.columns}
+
+::: {.column width="60%"}
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+#| fig-width: 7
+#| fig-height: 4
+
+model_plot(joined,'icb', 'SOMERSET', 'lm')
+```
+
+:::
+
+::: {.column width="40%"}
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+
+model_table('SOMERSET')
+
+```
+
+:::
+
+::::
+
+:::
+
+
+## Discussion
+
+There is certainly a correlation between handover delays and category 2 response times.  However this relationship is not the same across ICBs and has far more impact in certain areas.  Notably Cornwall, Gloucester and Somerset.
+
+What is more important is the magnitude of the handover delays as a contribution to the overall picture.  It is clear to see that Devon has a far higher delay time and so, whilst each delay may not contribute as much to the increase, the sheer volume is what is having impact.
+
+This summary table show the overall summary of the models and the impact of additional handover delay times on response times.
+
+```{r}
+#| echo: false
+#| warning: false
+#| message: false
+
+overal_sum_table
+
+```
+
+It must be noted that this is a very sparse model looking at a simple two feature correlation, there are no doubt other factors that contribute to response times that will be confounding these results.  Additional analysis with additional information, perhaps around numbers of incidents and availability of ambulances would make for a far more robust model.  It is recognised that some of this level of work has been carried out by SWAST themselves.
+
+There is also a note around the Devon and Cornwall ICB data being potentially skewed by the matching methodology.  This is worth noting, but does not take away from the overall result of the analysis.
+
+Although these models are relatively crude by using only weekly data, they did all return significant results and it is hoped that this analysis helps support understanding of the relationship between handover delays and category 2 response times.
+
+
+## References
+
+
+<sup>1 Hierarchical Linear Models: Applications and Data Analysis Methods (Advanced Quantitative Techniques in the Social Sciences) 2nd Edition
+by Stephen W. Raudenbush (Author), Anthony S. Bryk (Author)</sup>  
+
+<sup>2 https://www.health.org.uk/news-and-comment/news/increasing-handover-delays-contributing-to-growing-ambulance-waiting-times</sup>
+
+
+> **Contact**\
+> [**Simon Wellesley-Miller**](mailto:Simon.Wellesley-Miller@nhs.net)\
+> [**Alistair Hewson**](mailto:Alistair.Hewson@nhs.net)\
+> *South West Intelligence and Insights Team*\
+> Version 1.0\  
+> 6 June 2024
+
+
+:::
+
